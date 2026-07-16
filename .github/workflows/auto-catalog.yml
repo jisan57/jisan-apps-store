@@ -4,15 +4,9 @@ on:
   release:
     types: [published, edited, deleted]
   workflow_dispatch:
-  schedule:
-    - cron: "17 * * * *"
 
 permissions:
   contents: write
-
-concurrency:
-  group: jisan-apps-auto-catalog
-  cancel-in-progress: true
 
 jobs:
   build-catalog:
@@ -34,14 +28,20 @@ jobs:
       - name: Install Android build tools
         run: sdkmanager "build-tools;35.0.0"
 
-      - name: Generate catalog.json from published APK releases
+      - name: Generate catalog.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -e
+
           AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
-          export AAPT APKSIGNER
+
+          export AAPT
+          export APKSIGNER
+
+          echo "AAPT: $AAPT"
+          echo "APKSIGNER: $APKSIGNER"
 
           python3 <<'PY'
           import hashlib
@@ -53,8 +53,8 @@ jobs:
           import urllib.request
           from pathlib import Path
 
-          token = os.environ["GH_TOKEN"]
           repository = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
           aapt = os.environ["AAPT"]
           apksigner = os.environ["APKSIGNER"]
 
@@ -62,274 +62,398 @@ jobs:
               "Accept": "application/vnd.github+json",
               "Authorization": f"Bearer {token}",
               "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "JisanAppsCatalogBuilder/1.0",
+              "User-Agent": "JisanAppsCatalogBuilder"
           }
 
           def get_json(url):
               request = urllib.request.Request(url, headers=api_headers)
+
               with urllib.request.urlopen(request, timeout=60) as response:
                   return json.load(response)
 
-          def download(url, destination):
+          def download_file(url, destination):
               request = urllib.request.Request(
                   url,
-                  headers={"User-Agent": "JisanAppsCatalogBuilder/1.0"},
+                  headers={"User-Agent": "JisanAppsCatalogBuilder"}
               )
-              with urllib.request.urlopen(request, timeout=180) as response, open(destination, "wb") as output:
-                  while True:
-                      chunk = response.read(1024 * 1024)
-                      if not chunk:
-                          break
-                      output.write(chunk)
 
-          def run(command):
-              return subprocess.check_output(command, text=True, errors="replace")
+              with urllib.request.urlopen(request, timeout=180) as response:
+                  with open(destination, "wb") as output:
+                      while True:
+                          chunk = response.read(1024 * 1024)
 
-          def first_match(pattern, text, default=""):
-              match = re.search(pattern, text, re.MULTILINE)
-              return match.group(1).strip() if match else default
+                          if not chunk:
+                              break
 
-          def format_size(size):
-              value = float(size)
-              for unit in ("B", "KB", "MB", "GB"):
-                  if value < 1024 or unit == "GB":
-                      return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-                  value /= 1024
-              return f"{size} B"
+                          output.write(chunk)
 
-          def infer_category(name, package_name):
-              value = f"{name} {package_name}".lower()
-              if any(word in value for word in ("learn", "english", "quiz", "education", "b2e")):
+          def run_command(command):
+              result = subprocess.run(
+                  command,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT
+              )
+
+              if result.returncode != 0:
+                  raise RuntimeError(
+                      f"Command failed: {' '.join(command)}\n{result.stdout}"
+                  )
+
+              return result.stdout
+
+          def read_attribute(text, attribute):
+              match = re.search(
+                  rf"{re.escape(attribute)}='([^']*)'",
+                  text
+              )
+
+              return match.group(1).strip() if match else ""
+
+          def format_size(size_bytes):
+              size = float(size_bytes)
+
+              if size < 1024:
+                  return f"{int(size)} B"
+
+              size /= 1024
+
+              if size < 1024:
+                  return f"{size:.1f} KB"
+
+              size /= 1024
+
+              return f"{size:.1f} MB"
+
+          def clean_app_name(release_name, package_name):
+              name = re.sub(
+                  r"\s+v?\d+(?:\.\d+)*.*$",
+                  "",
+                  release_name,
+                  flags=re.IGNORECASE
+              ).strip()
+
+              if name:
+                  return name
+
+              return (
+                  package_name
+                  .split(".")[-1]
+                  .replace("-", " ")
+                  .replace("_", " ")
+                  .title()
+              )
+
+          def category_for(name, package_name):
+              text = f"{name} {package_name}".lower()
+
+              if any(word in text for word in [
+                  "learn", "english", "education", "quiz", "b2e"
+              ]):
                   return "Education"
-              if any(word in value for word in ("niyam", "focus", "wellbeing", "screen time")):
-                  return "Digital Wellbeing"
-              if any(word in value for word in ("note", "task", "todo", "productivity")):
+
+              if any(word in text for word in [
+                  "note", "todo", "task", "productivity"
+              ]):
                   return "Productivity"
+
+              if any(word in text for word in [
+                  "niyam", "focus", "wellbeing", "screen"
+              ]):
+                  return "Digital Wellbeing"
+
               return "Jisan Tech App"
 
           releases = []
           page = 1
 
           while True:
-              batch = get_json(
-                  f"https://api.github.com/repos/{repository}/releases?per_page=100&page={page}"
+              release_page = get_json(
+                  f"https://api.github.com/repos/{repository}/releases"
+                  f"?per_page=100&page={page}"
               )
-              if not batch:
+
+              if not release_page:
                   break
 
-              releases.extend(batch)
+              releases.extend(release_page)
 
-              if len(batch) < 100:
+              if len(release_page) < 100:
                   break
 
               page += 1
 
-          latest_by_package = {}
+          print(f"Published release records found: {len(releases)}")
 
-          with tempfile.TemporaryDirectory() as temp_dir:
-              temp_dir = Path(temp_dir)
+          latest_apps = {}
+          parsing_errors = []
+
+          with tempfile.TemporaryDirectory() as temporary_directory:
+              temp_directory = Path(temporary_directory)
 
               for release in releases:
-                  if release.get("draft") or release.get("prerelease"):
+                  if release.get("draft"):
+                      continue
+
+                  if release.get("prerelease"):
                       continue
 
                   release_name = (
                       release.get("name")
                       or release.get("tag_name")
-                      or "Official App"
+                      or "Jisan Tech App"
                   ).strip()
 
                   release_body = (release.get("body") or "").strip()
-                  published_at = (
+
+                  updated_at = (
                       release.get("published_at")
                       or release.get("created_at")
                       or ""
                   )[:10]
 
-                  for asset in release.get("assets") or []:
+                  assets = release.get("assets") or []
+
+                  for asset in assets:
                       asset_name = asset.get("name") or ""
 
                       if not asset_name.lower().endswith(".apk"):
                           continue
 
                       apk_url = asset.get("browser_download_url") or ""
-                      official_prefix = (
-                          f"https://github.com/{repository}/releases/download/"
-                      )
 
-                      if not apk_url.startswith(official_prefix):
-                          continue
-
-                      apk_path = temp_dir / f"{asset.get('id', 0)}.apk"
-                      download(apk_url, apk_path)
-
-                      badging = run([aapt, "dump", "badging", str(apk_path)])
-
-                      package_line = re.search(
-                          r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']*)'",
-                          badging,
-                      )
-
-                      if not package_line:
-                          continue
-
-                      package_name = package_line.group(1).strip()
+                      print(f"Processing APK: {apk_url}")
 
                       try:
-                          version_code = int(package_line.group(2))
-                      except ValueError:
-                          continue
-
-                      version_name = (
-                          package_line.group(3).strip() or str(version_code)
-                      )
-
-                      app_name = first_match(
-                          r"^application-label:'([^']*)'",
-                          badging,
-                      )
-
-                      if not app_name:
-                          app_name = re.sub(
-                              r"\s+v?\d+(?:\.\d+)*.*$",
-                              "",
-                              release_name,
-                              flags=re.I,
-                          ).strip()
-
-                      if not app_name:
-                          app_name = (
-                              package_name.rsplit(".", 1)[-1]
-                              .replace("_", " ")
-                              .replace("-", " ")
-                              .title()
+                          apk_path = (
+                              temp_directory
+                              / f"{release.get('id')}_{asset.get('id')}.apk"
                           )
 
-                      permissions = sorted(
-                          set(
-                              re.findall(
-                                  r"^uses-permission(?:-[^:]+)?: name='([^']+)'",
-                                  badging,
-                                  re.MULTILINE,
+                          download_file(apk_url, apk_path)
+
+                          badging = run_command([
+                              aapt,
+                              "dump",
+                              "badging",
+                              str(apk_path)
+                          ])
+
+                          package_line = ""
+
+                          for line in badging.splitlines():
+                              if line.startswith("package:"):
+                                  package_line = line
+                                  break
+
+                          if not package_line:
+                              raise RuntimeError(
+                                  "Package information was not found"
                               )
-                          )
-                      )
 
-                      cert_output = run(
-                          [
+                          package_name = read_attribute(
+                              package_line,
+                              "name"
+                          )
+
+                          version_code_text = read_attribute(
+                              package_line,
+                              "versionCode"
+                          )
+
+                          version_name = read_attribute(
+                              package_line,
+                              "versionName"
+                          )
+
+                          if not package_name:
+                              raise RuntimeError("Package name is empty")
+
+                          if not version_code_text:
+                              raise RuntimeError("Version code is empty")
+
+                          version_code = int(version_code_text)
+
+                          if not version_name:
+                              version_name = str(version_code)
+
+                          application_name = ""
+
+                          for line in badging.splitlines():
+                              if line.startswith("application-label:"):
+                                  match = re.search(
+                                      r"application-label:'([^']*)'",
+                                      line
+                                  )
+
+                                  if match:
+                                      application_name = (
+                                          match.group(1).strip()
+                                      )
+
+                                  break
+
+                          if not application_name:
+                              application_name = clean_app_name(
+                                  release_name,
+                                  package_name
+                              )
+
+                          permissions = sorted(set(
+                              re.findall(
+                                  r"uses-permission(?:-[^:]+)?: "
+                                  r"name='([^']+)'",
+                                  badging
+                              )
+                          ))
+
+                          certificate_output = run_command([
                               apksigner,
                               "verify",
                               "--print-certs",
-                              str(apk_path),
-                          ]
-                      )
+                              str(apk_path)
+                          ])
 
-                      signature_sha256 = first_match(
-                          r"Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F: ]+)",
-                          cert_output,
-                      ).replace(":", "").replace(" ", "").lower()
-
-                      if not signature_sha256:
-                          continue
-
-                      file_sha256 = hashlib.sha256(
-                          apk_path.read_bytes()
-                      ).hexdigest()
-
-                      description = "Official app by Jisan Tech."
-
-                      changelog = [
-                          line.strip(" -•\t")
-                          for line in release_body.splitlines()
-                          if line.strip()
-                      ]
-
-                      if not changelog:
-                          changelog = [
-                              f"Official release: {release_name}"
-                          ]
-
-                      item = {
-                          "id": package_name,
-                          "name": app_name,
-                          "packageName": package_name,
-                          "category": infer_category(
-                              app_name,
-                              package_name,
-                          ),
-                          "shortDescription": description,
-                          "description": description,
-                          "versionName": version_name,
-                          "versionCode": version_code,
-                          "apkUrl": apk_url,
-                          "iconUrl": "",
-                          "size": format_size(
-                              asset.get("size")
-                              or apk_path.stat().st_size
-                          ),
-                          "updatedAt": published_at,
-                          "sha256": file_sha256,
-                          "signatureSha256": signature_sha256,
-                          "downloadCount": int(
-                              asset.get("download_count") or 0
-                          ),
-                          "featured": True,
-                          "published": True,
-                          "permissions": permissions,
-                          "changelog": changelog,
-                      }
-
-                      current = latest_by_package.get(package_name)
-
-                      if (
-                          current is None
-                          or version_code > current[0]
-                          or (
-                              version_code == current[0]
-                              and (release.get("id") or 0) > current[1]
-                          )
-                      ):
-                          latest_by_package[package_name] = (
-                              version_code,
-                              release.get("id") or 0,
-                              item,
+                          certificate_match = re.search(
+                              r"certificate SHA-256 digest:\s*"
+                              r"([0-9a-fA-F: ]+)",
+                              certificate_output,
+                              re.IGNORECASE
                           )
 
-          apps = [
-              value[2]
-              for value in latest_by_package.values()
-          ]
+                          if not certificate_match:
+                              raise RuntimeError(
+                                  "Signing certificate was not found"
+                              )
 
-          apps.sort(key=lambda item: item["name"].lower())
+                          signature_sha256 = (
+                              certificate_match.group(1)
+                              .replace(":", "")
+                              .replace(" ", "")
+                              .lower()
+                          )
+
+                          file_sha256 = hashlib.sha256(
+                              apk_path.read_bytes()
+                          ).hexdigest()
+
+                          description_lines = [
+                              line.strip(" -•\t")
+                              for line in release_body.splitlines()
+                              if line.strip()
+                          ]
+
+                          if description_lines:
+                              description = description_lines[0]
+                              changelog = description_lines
+                          else:
+                              description = (
+                                  f"Official {application_name} app "
+                                  f"by Jisan Tech."
+                              )
+                              changelog = [
+                                  f"Official release: {release_name}"
+                              ]
+
+                          app_data = {
+                              "id": package_name,
+                              "name": application_name,
+                              "packageName": package_name,
+                              "category": category_for(
+                                  application_name,
+                                  package_name
+                              ),
+                              "shortDescription": description,
+                              "description": description,
+                              "versionName": version_name,
+                              "versionCode": version_code,
+                              "apkUrl": apk_url,
+                              "iconUrl": "",
+                              "size": format_size(
+                                  asset.get("size")
+                                  or apk_path.stat().st_size
+                              ),
+                              "updatedAt": updated_at,
+                              "sha256": file_sha256,
+                              "signatureSha256": signature_sha256,
+                              "downloadCount": int(
+                                  asset.get("download_count") or 0
+                              ),
+                              "featured": True,
+                              "published": True,
+                              "permissions": permissions,
+                              "changelog": changelog
+                          }
+
+                          current_app = latest_apps.get(package_name)
+
+                          if (
+                              current_app is None
+                              or version_code
+                              > current_app["versionCode"]
+                          ):
+                              latest_apps[package_name] = app_data
+
+                          print(
+                              f"Added: {application_name} | "
+                              f"{package_name} | "
+                              f"Version {version_name}"
+                          )
+
+                      except Exception as error:
+                          error_message = (
+                              f"{release_name} / {asset_name}: {error}"
+                          )
+
+                          parsing_errors.append(error_message)
+                          print(f"ERROR: {error_message}")
+
+          apps = list(latest_apps.values())
+          apps.sort(key=lambda app: app["name"].lower())
+
+          print(f"Successfully parsed apps: {len(apps)}")
+
+          if parsing_errors:
+              print("APK parsing errors:")
+
+              for parsing_error in parsing_errors:
+                  print(parsing_error)
+
+          if not apps:
+              raise RuntimeError(
+                  "No valid APK could be parsed. "
+                  "The existing catalog.json was not overwritten."
+              )
 
           catalog = {
-              "generatedAt": os.environ.get("GITHUB_RUN_ID", ""),
               "repository": repository,
-              "apps": apps,
+              "apps": apps
           }
 
           Path("catalog.json").write_text(
               json.dumps(
                   catalog,
                   ensure_ascii=False,
-                  indent=2,
+                  indent=2
               ) + "\n",
-              encoding="utf-8",
+              encoding="utf-8"
           )
 
-          print(f"Generated catalog with {len(apps)} apps")
+          print("catalog.json generated successfully")
           PY
 
-      - name: Commit catalog changes
+      - name: Commit catalog.json
         run: |
-          if git diff --quiet -- catalog.json; then
-            echo "catalog.json is already current"
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add catalog.json
+
+          if git diff --cached --quiet; then
+            echo "No catalog changes found"
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add catalog.json
           git commit -m "Auto update app catalog"
           git push
