@@ -16,7 +16,7 @@
       "updatedAt": "2026-07-15",
       "sha256": "631d55a2e75047a091bba895951b6727599ee5b4e97cd25ac93aff8f751d58d0",
       "signatureSha256": "726938f9fecb3c47155cd3108c56f827ac81ae0609ee50c4b6531f1a88134546",
-      "downloadCount": 4,
+      "downloadCount": 8,
       "featured": true,
       "published": true,
       "permissions": [
@@ -33,20 +33,20 @@
       "category": "Productivity",
       "shortDescription": "Official NexaNotes app by Jisan Tech.",
       "description": "Official NexaNotes app by Jisan Tech.",
-      "versionName": "1.0",
-      "versionCode": 1,
-      "apkUrl": "https://github.com/jisan57/jisan-apps-store/releases/download/note-v1.0/base.apk",
+      "versionName": "2.0",
+      "versionCode": 2,
+      "apkUrl": "https://github.com/jisan57/jisan-apps-store/releases/download/note-v2.0/base.1.apk",
       "iconUrl": "",
-      "size": "221.4 KB",
+      "size": "41.3 KB",
       "updatedAt": "2026-07-16",
-      "sha256": "1247dedecb55af44502f0e3f0aceba7f7716982f4e0d9925ea996651469ed1b0",
+      "sha256": "2b91977dad6acb800467fbeb94381c9df84403274534435d7adf1511515cf842",
       "signatureSha256": "726938f9fecb3c47155cd3108c56f827ac81ae0609ee50c4b6531f1a88134546",
       "downloadCount": 3,
       "featured": true,
       "published": true,
       "permissions": [],
       "changelog": [
-        "Official release: Jisan Note v1.0"
+        "Official release: NexaNotes v2.0"
       ]
     }
   ]
