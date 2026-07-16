@@ -1,0 +1,335 @@
+name: Auto Build App Catalog
+
+on:
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jisan-apps-auto-catalog
+  cancel-in-progress: true
+
+jobs:
+  build-catalog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: sdkmanager "build-tools;35.0.0"
+
+      - name: Generate catalog.json from published APK releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          export AAPT APKSIGNER
+
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import tempfile
+          import urllib.request
+          from pathlib import Path
+
+          token = os.environ["GH_TOKEN"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          aapt = os.environ["AAPT"]
+          apksigner = os.environ["APKSIGNER"]
+
+          api_headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "JisanAppsCatalogBuilder/1.0",
+          }
+
+          def get_json(url):
+              request = urllib.request.Request(url, headers=api_headers)
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+
+          def download(url, destination):
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "JisanAppsCatalogBuilder/1.0"},
+              )
+              with urllib.request.urlopen(request, timeout=180) as response, open(destination, "wb") as output:
+                  while True:
+                      chunk = response.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      output.write(chunk)
+
+          def run(command):
+              return subprocess.check_output(command, text=True, errors="replace")
+
+          def first_match(pattern, text, default=""):
+              match = re.search(pattern, text, re.MULTILINE)
+              return match.group(1).strip() if match else default
+
+          def format_size(size):
+              value = float(size)
+              for unit in ("B", "KB", "MB", "GB"):
+                  if value < 1024 or unit == "GB":
+                      return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+                  value /= 1024
+              return f"{size} B"
+
+          def infer_category(name, package_name):
+              value = f"{name} {package_name}".lower()
+              if any(word in value for word in ("learn", "english", "quiz", "education", "b2e")):
+                  return "Education"
+              if any(word in value for word in ("niyam", "focus", "wellbeing", "screen time")):
+                  return "Digital Wellbeing"
+              if any(word in value for word in ("note", "task", "todo", "productivity")):
+                  return "Productivity"
+              return "Jisan Tech App"
+
+          releases = []
+          page = 1
+
+          while True:
+              batch = get_json(
+                  f"https://api.github.com/repos/{repository}/releases?per_page=100&page={page}"
+              )
+              if not batch:
+                  break
+
+              releases.extend(batch)
+
+              if len(batch) < 100:
+                  break
+
+              page += 1
+
+          latest_by_package = {}
+
+          with tempfile.TemporaryDirectory() as temp_dir:
+              temp_dir = Path(temp_dir)
+
+              for release in releases:
+                  if release.get("draft") or release.get("prerelease"):
+                      continue
+
+                  release_name = (
+                      release.get("name")
+                      or release.get("tag_name")
+                      or "Official App"
+                  ).strip()
+
+                  release_body = (release.get("body") or "").strip()
+                  published_at = (
+                      release.get("published_at")
+                      or release.get("created_at")
+                      or ""
+                  )[:10]
+
+                  for asset in release.get("assets") or []:
+                      asset_name = asset.get("name") or ""
+
+                      if not asset_name.lower().endswith(".apk"):
+                          continue
+
+                      apk_url = asset.get("browser_download_url") or ""
+                      official_prefix = (
+                          f"https://github.com/{repository}/releases/download/"
+                      )
+
+                      if not apk_url.startswith(official_prefix):
+                          continue
+
+                      apk_path = temp_dir / f"{asset.get('id', 0)}.apk"
+                      download(apk_url, apk_path)
+
+                      badging = run([aapt, "dump", "badging", str(apk_path)])
+
+                      package_line = re.search(
+                          r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']*)'",
+                          badging,
+                      )
+
+                      if not package_line:
+                          continue
+
+                      package_name = package_line.group(1).strip()
+
+                      try:
+                          version_code = int(package_line.group(2))
+                      except ValueError:
+                          continue
+
+                      version_name = (
+                          package_line.group(3).strip() or str(version_code)
+                      )
+
+                      app_name = first_match(
+                          r"^application-label:'([^']*)'",
+                          badging,
+                      )
+
+                      if not app_name:
+                          app_name = re.sub(
+                              r"\s+v?\d+(?:\.\d+)*.*$",
+                              "",
+                              release_name,
+                              flags=re.I,
+                          ).strip()
+
+                      if not app_name:
+                          app_name = (
+                              package_name.rsplit(".", 1)[-1]
+                              .replace("_", " ")
+                              .replace("-", " ")
+                              .title()
+                          )
+
+                      permissions = sorted(
+                          set(
+                              re.findall(
+                                  r"^uses-permission(?:-[^:]+)?: name='([^']+)'",
+                                  badging,
+                                  re.MULTILINE,
+                              )
+                          )
+                      )
+
+                      cert_output = run(
+                          [
+                              apksigner,
+                              "verify",
+                              "--print-certs",
+                              str(apk_path),
+                          ]
+                      )
+
+                      signature_sha256 = first_match(
+                          r"Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F: ]+)",
+                          cert_output,
+                      ).replace(":", "").replace(" ", "").lower()
+
+                      if not signature_sha256:
+                          continue
+
+                      file_sha256 = hashlib.sha256(
+                          apk_path.read_bytes()
+                      ).hexdigest()
+
+                      description = "Official app by Jisan Tech."
+
+                      changelog = [
+                          line.strip(" -•\t")
+                          for line in release_body.splitlines()
+                          if line.strip()
+                      ]
+
+                      if not changelog:
+                          changelog = [
+                              f"Official release: {release_name}"
+                          ]
+
+                      item = {
+                          "id": package_name,
+                          "name": app_name,
+                          "packageName": package_name,
+                          "category": infer_category(
+                              app_name,
+                              package_name,
+                          ),
+                          "shortDescription": description,
+                          "description": description,
+                          "versionName": version_name,
+                          "versionCode": version_code,
+                          "apkUrl": apk_url,
+                          "iconUrl": "",
+                          "size": format_size(
+                              asset.get("size")
+                              or apk_path.stat().st_size
+                          ),
+                          "updatedAt": published_at,
+                          "sha256": file_sha256,
+                          "signatureSha256": signature_sha256,
+                          "downloadCount": int(
+                              asset.get("download_count") or 0
+                          ),
+                          "featured": True,
+                          "published": True,
+                          "permissions": permissions,
+                          "changelog": changelog,
+                      }
+
+                      current = latest_by_package.get(package_name)
+
+                      if (
+                          current is None
+                          or version_code > current[0]
+                          or (
+                              version_code == current[0]
+                              and (release.get("id") or 0) > current[1]
+                          )
+                      ):
+                          latest_by_package[package_name] = (
+                              version_code,
+                              release.get("id") or 0,
+                              item,
+                          )
+
+          apps = [
+              value[2]
+              for value in latest_by_package.values()
+          ]
+
+          apps.sort(key=lambda item: item["name"].lower())
+
+          catalog = {
+              "generatedAt": os.environ.get("GITHUB_RUN_ID", ""),
+              "repository": repository,
+              "apps": apps,
+          }
+
+          Path("catalog.json").write_text(
+              json.dumps(
+                  catalog,
+                  ensure_ascii=False,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+
+          print(f"Generated catalog with {len(apps)} apps")
+          PY
+
+      - name: Commit catalog changes
+        run: |
+          if git diff --quiet -- catalog.json; then
+            echo "catalog.json is already current"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add catalog.json
+          git commit -m "Auto update app catalog"
+          git push
