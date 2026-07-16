@@ -1,44 +1,5 @@
 {
-  "apps": [
-    {
-      "id": "b2e-learning",
-      "name": "B2E Learning",
-      "packageName": "com.jisantech.b2elearning",
-      "category": "Education",
-      "shortDescription": "Learn English from Bangla.",
-      "description": "Vocabulary, grammar, quizzes and English conversation practice.",
-      "versionName": "1.0",
-      "versionCode": 1,
-      "apkUrl": "https://github.com/jisan57/jisan-apps-store/releases/download/b2e-v1.0/base.apk",
-      "iconUrl": "",
-      "size": "402 KB",
-      "updatedAt": "2026-07-15",
-      "featured": true,
-      "sha256": "",
-      "signatureSha256": "",
-      "permissions": [],
-      "changelog": [
-        "First release"
-      ]
-    },
-    {
-      "id": "niyam",
-      "name": "NIYAM",
-      "packageName": "com.jisantech.niyam",
-      "category": "Digital Wellbeing",
-      "shortDescription": "Control screen time and improve focus.",
-      "description": "NIYAM will be available soon.",
-      "versionName": "1.0",
-      "versionCode": 1,
-      "apkUrl": "",
-      "iconUrl": "",
-      "size": "Coming soon",
-      "updatedAt": "2026-07-15",
-      "featured": true,
-      "sha256": "",
-      "signatureSha256": "",
-      "permissions": [],
-      "changelog": []
-    }
-  ]
+  "generatedAt": "29503220824",
+  "repository": "jisan57/jisan-apps-store",
+  "apps": []
 }
